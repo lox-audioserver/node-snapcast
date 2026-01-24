@@ -1,0 +1,29 @@
+{
+  "name": "@lox-audioserver/node-snapcast",
+  "version": "0.1.0",
+  "description": "Node.js Snapcast-compatible server core.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist",
+    "test": "npm run build",
+    "prepare": "npm run build"
+  },
+  "keywords": ["snapcast", "audio", "protocol", "sync"],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lox-audioserver/node-snapcast.git"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
