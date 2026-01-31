@@ -289,28 +289,59 @@ export class SnapcastCore {
       this.streams.has(streamId) ||
       Array.from(this.clients).some((client) => client.streamId === streamId);
     this.clearStream(streamId);
-    const onData = (chunk: Buffer) => {
+    const waitForClient = async (): Promise<void> => {
       const active = this.streams.get(streamId);
-      if (!active) return;
-      active.chunkBuffer = Buffer.concat([active.chunkBuffer, chunk]);
-      const chunkSize = Math.max(1, active.targetBytes);
-      while (active.chunkBuffer.length >= chunkSize) {
-        const payload = active.chunkBuffer.slice(0, chunkSize);
-        active.chunkBuffer = active.chunkBuffer.slice(chunkSize);
-        this.broadcastWireChunk(streamId, payload);
+      if (!active || active.closed) return;
+      if (typeof (stream as any).pause === 'function') {
+        try {
+          (stream as any).pause();
+        } catch {
+          /* ignore */
+        }
       }
-    };
-    const onError = (error: Error) => {
-      this.log.debug('snapcast stream error', { zoneId, message: error.message });
-    };
-    const onClose = () => {
-      this.log.debug('snapcast stream closed', { zoneId });
-      this.clearStream(streamId);
+      if (!active.waitingForClient) {
+        active.waitingForClient = true;
+        active.waitForClientResolve = undefined;
+      }
+      await new Promise<void>((resolve) => {
+        const latest = this.streams.get(streamId);
+        if (!latest || latest.closed) {
+          resolve();
+          return;
+        }
+        latest.waitForClientResolve = resolve;
+      });
     };
 
-    stream.on('data', onData);
-    stream.once('error', onError);
-    stream.once('close', onClose);
+    const consumeStream = async (): Promise<void> => {
+      try {
+        // Ensure paused until at least one client is connected.
+        if (!this.hasActiveClient(streamId)) {
+          await waitForClient();
+        }
+        for await (const chunk of stream as any) {
+          const active = this.streams.get(streamId);
+          if (!active || active.closed) return;
+          if (!this.hasActiveClient(streamId)) {
+            await waitForClient();
+            continue;
+          }
+          active.chunkBuffer = Buffer.concat([active.chunkBuffer, chunk]);
+          const chunkSize = Math.max(1, active.targetBytes);
+          while (active.chunkBuffer.length >= chunkSize) {
+            const payload = active.chunkBuffer.slice(0, chunkSize);
+            active.chunkBuffer = active.chunkBuffer.slice(chunkSize);
+            this.broadcastWireChunk(streamId, payload);
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log.debug('snapcast stream error', { zoneId, message });
+      } finally {
+        this.log.debug('snapcast stream closed', { zoneId });
+        this.clearStream(streamId);
+      }
+    };
 
     const active: ActiveStream = {
       streamId,
@@ -321,16 +352,24 @@ export class SnapcastCore {
       nextTimestampUs: 0,
       chunkBuffer: Buffer.alloc(0),
       source: stream,
+      waitingForClient: false,
+      closed: false,
       cleanup: () => {
-        stream.off('data', onData);
-        stream.off('error', onError);
-        stream.off('close', onClose);
+        const current = this.streams.get(streamId);
+        if (current) {
+          current.closed = true;
+          if (current.waitForClientResolve) {
+            current.waitForClientResolve();
+            current.waitForClientResolve = undefined;
+          }
+        }
         if (typeof (stream as any).destroy === 'function') {
           (stream as any).destroy();
         }
       },
     };
     this.streams.set(streamId, active);
+    void consumeStream();
 
     // Register client mappings for this stream.
     clientIds.forEach((id) => {
@@ -999,15 +1038,39 @@ export class SnapcastCore {
   private updateFlowControl(streamId: string): void {
     const active = this.streams.get(streamId);
     if (!active) return;
-    const hasClient = Array.from(this.clients).some(
-      (client) => client.streamId === streamId && this.isClientOpen(client),
-    );
+    const hasClient = this.hasActiveClient(streamId);
+    if (hasClient && active.waitForClientResolve) {
+      active.waitingForClient = false;
+      const resolve = active.waitForClientResolve;
+      active.waitForClientResolve = undefined;
+      resolve();
+      if (typeof (active.source as any).resume === 'function') {
+        try {
+          (active.source as any).resume();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    if (!hasClient && typeof (active.source as any).pause === 'function') {
+      try {
+        (active.source as any).pause();
+      } catch {
+        /* ignore */
+      }
+    }
     if (!hasClient && active.chunkBuffer.length > 0) {
       // Drop any queued audio when nobody is listening to avoid unbounded buffers.
       active.chunkBuffer = Buffer.alloc(0);
       active.nextTimestampUs = 0;
       this.log.debug('snapcast stream drained (no clients)', { streamId });
     }
+  }
+
+  private hasActiveClient(streamId: string): boolean {
+    return Array.from(this.clients).some(
+      (client) => client.streamId === streamId && this.isClientOpen(client),
+    );
   }
 
   private computeBufferMs(output: AudioOutputSettings): number {

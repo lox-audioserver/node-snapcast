@@ -61,5 +61,8 @@ export type ActiveStream = {
   nextTimestampUs: number;
   chunkBuffer: Buffer;
   source: NodeJS.ReadableStream;
+  waitingForClient: boolean;
+  waitForClientResolve?: () => void;
+  closed: boolean;
   cleanup: () => void;
 };
